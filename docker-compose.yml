@@ -1,0 +1,79 @@
+# Production-ready stack: one kwork-bot + one FreeDeepSeekAPI proxy with
+# Chrome/xvfb baked in so cookie refresh is fully autonomous on a headless
+# server.
+#
+# Usage:
+#   cp .env.example .env        # edit TELEGRAM_BOT_TOKEN + DEEPSEEK_API_KEY
+#   docker compose up -d --build
+#   docker compose logs -f kwork-bot
+#
+# On first deploy you'll also want to seed dsk/cookies.json (see DEPLOY.md).
+services:
+  deepseek:
+    build:
+      context: ../FreeDeepSeekAPI
+      dockerfile: Dockerfile
+    container_name: freedeepseekapi
+    restart: unless-stopped
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+      # The proxy's own default token fallback; clients (the bot) may
+      # override it per-request via Authorization: Bearer <token>.
+      - DEEPSEEK_AUTH_TOKEN=${DEEPSEEK_API_KEY}
+      - DEEPSEEK_SEARCH_DEFAULT=false
+      - DEEPSEEK_SESSION_REUSE_LIMIT=30
+      # /admin/* endpoints use this; falls back to DEEPSEEK_AUTH_TOKEN
+      # if unset, which matches what the bot sends by default.
+      - ADMIN_SECRET=${DEEPSEEK_API_KEY}
+    # Keep cookies and any other runtime state in a named volume so
+    # container rebuilds don't invalidate the WAF session.
+    volumes:
+      - deepseek_cookies:/app/dsk
+    # Not exposed to the host — only kwork-bot needs to talk to it on the
+    # internal compose network. If you want to curl /v1/models from the
+    # host for debugging, add `ports: ["127.0.0.1:8080:8080"]` yourself.
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/v1/models"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # Chrome needs a bit of shared memory for Cloudflare / AWS WAF.
+    shm_size: "512m"
+    # Keep container output in journald via Docker's default json-file
+    # driver; override in production if you ship logs to Loki/ES.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  kwork-bot:
+    build: .
+    container_name: kwork-telegram-bot
+    restart: unless-stopped
+    depends_on:
+      deepseek:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Override whatever the user put into their .env for these — inside
+      # the compose network the proxy is reachable by service name.
+      - DEEPSEEK_API_BASE=http://deepseek:8080/v1
+      - COOKIE_REFRESH_URL=http://deepseek:8080/admin/refresh-cookies
+      - SQLITE_PATH=/data/kwork_bot.sqlite3
+    volumes:
+      - bot_state:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  deepseek_cookies:
+  bot_state:
