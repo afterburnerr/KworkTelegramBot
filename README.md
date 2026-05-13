@@ -2,7 +2,7 @@
 
 Telegram-бот, который в реальном времени мониторит биржу заказов
 [kwork.ru/projects](https://kwork.ru/projects) и через локальный DeepSeek
-([FreeDeepSeekAPI](../FreeDeepSeekAPI)) отбирает интересные заказы для
+([github.com/afterburnerr/FreeDeepSeekAPI](../FreeDeepSeekAPI)) отбирает интересные заказы для
 разработчика / инженера.
 
 > **Важно:** проект работает в паре с локальным OpenAI-совместимым
