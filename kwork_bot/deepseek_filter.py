@@ -67,10 +67,31 @@ DEFAULT_FILTER_PROMPT = (
 )
 
 SYSTEM_INSTRUCTIONS = (
-    "Ты отвечаешь ТОЛЬКО валидным JSON объектом вида "
-    '{"interesting": true|false, "reason": "краткое пояснение на русском, 1-12 слов"}. '
-    "Никакого текста до или после JSON. Никаких markdown-блоков. "
-    "Поле interesting — boolean. Никогда не используй null."
+    "Отвечай ТОЛЬКО валидным JSON объектом вида:\n"
+    '{"interesting": true|false, "reason": "кратко, 1-12 слов", '
+    '"pitch": "текст отклика для клиента или пустая строка"}\n'
+    "\n"
+    "Никакого текста до или после JSON. Никаких markdown-блоков.\n"
+    "Поле interesting — boolean, никогда не null.\n"
+    "Поле reason — краткое пояснение на русском (1-12 слов).\n"
+    "\n"
+    "Поле pitch:\n"
+    "• Если interesting=false — pusto (\"\").\n"
+    "• Если interesting=true — готовое сообщение-отклик клиенту на русском, "
+    "которое можно отправить как есть. 2-3 коротких предложения, "
+    "СТРОГО до 230 символов. Без markdown и эмодзи.\n"
+    "• Дружелюбное, живое, без канцелярита (не «Здравствуйте, уважаемый «клиент»», "
+    "не «Профессионально и качественно выполню»). Обычное человеческое начало — "
+    "«Здравствуйте!» или «Привет!». Заверши открытой фразой, побуждающей ответить "
+    "(например, «Напишите, если удобно обсудить»).\n"
+    "• Обязательно упомяни конкретику задачи (например: «парсер Яндекс-карт», "
+    "«Telegram-бот на Python», «вёрстка лендинга на Tilda»), а не общие слова.\n"
+    "• Можно кратко сказать об опыте в 1-2 слова, но без хвастовства и без списков.\n"
+    "\n"
+    "Пример хорошего pitch:\n"
+    '"Привет! Гляну ваш список URL и соберу таблицу с нужными полями — '
+    'на Python такое делаю регулярно. Готов обсудить детали и назвать сроки. '
+    'Напишите, если интересно."'
 )
 
 
@@ -87,6 +108,9 @@ class FilterDecision:
     #   'auth'        — DeepSeek rejected the auth token (HTTP 401)
     #   'transport'   — network / timeout / other API error
     status: str = "ok"
+    # Short, friendly, ready-to-send response for the project author.
+    # Empty string when the project was classified as not interesting.
+    pitch: str = ""
 
 
 class DeepSeekFilter:
@@ -224,7 +248,31 @@ class DeepSeekFilter:
         )
 
 
+# Hard cap on the pitch length we pass to Telegram's CopyTextButton
+# (the API allows up to 256 chars; we stay below that for safety).
+_PITCH_MAX_LEN = 240
+
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _clean_pitch(value: object) -> str:
+    """Normalise the pitch string coming back from the model.
+
+    Strips markdown, stray quotes and whitespace; collapses internal newlines
+    (Telegram CopyTextButton renders them oddly); enforces the 240-char cap
+    with a trailing ellipsis so callers can feed it directly into the button.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    # Sometimes the model wraps the pitch in extra quotes.
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("\"", "'", "«", "»"):
+        text = text[1:-1].strip()
+    # Collapse newlines / tabs into single spaces.
+    text = " ".join(text.split())
+    if len(text) > _PITCH_MAX_LEN:
+        text = text[: _PITCH_MAX_LEN - 1].rsplit(" ", 1)[0] + "…"
+    return text
 
 
 def _parse_decision(content: str) -> FilterDecision:
@@ -263,8 +311,13 @@ def _parse_decision(content: str) -> FilterDecision:
             continue
         interesting = bool(obj.get("interesting"))
         reason = str(obj.get("reason") or "").strip()[:160] or "—"
+        pitch = _clean_pitch(obj.get("pitch")) if interesting else ""
         return FilterDecision(
-            interesting=interesting, reason=reason, raw=content, status="ok"
+            interesting=interesting,
+            reason=reason,
+            raw=content,
+            status="ok",
+            pitch=pitch,
         )
 
     # Last resort: look for the words "yes"/"да"/"true" near "interesting".
